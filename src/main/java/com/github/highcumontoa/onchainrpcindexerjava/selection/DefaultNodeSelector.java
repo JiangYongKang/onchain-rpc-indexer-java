@@ -153,12 +153,27 @@ public class DefaultNodeSelector implements NodeSelector {
 
     @Override
     public List<NodeStatusView> status() {
+        long now = clock.getAsLong();
         List<NodeStatusView> views = new ArrayList<>();
         for (Map.Entry<String, Stats> e : stats.entrySet()) {
             Stats s = e.getValue();
             synchronized (s) {
+                NodeState state;
+                long remaining = 0;
+                if (s.isolated) {
+                    long elapsed = now - s.isolatedAt;
+                    if (elapsed >= recoveryCooldownMs) {
+                        state = NodeState.HALF_OPEN;
+                    } else {
+                        state = NodeState.ISOLATED;
+                        remaining = recoveryCooldownMs - elapsed;
+                    }
+                } else {
+                    state = NodeState.AVAILABLE;
+                }
                 views.add(new NodeStatusView(e.getKey(), s.isolated, s.consecutiveFailures,
-                        s.totalSuccesses, s.totalFailures, s.avgLatencyMs, s.lastError));
+                        s.totalSuccesses, s.totalFailures, s.avgLatencyMs, s.lastError,
+                        state, remaining));
             }
         }
         views.sort(Comparator.comparing(NodeStatusView::nodeId));

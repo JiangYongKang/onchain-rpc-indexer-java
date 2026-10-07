@@ -1,5 +1,8 @@
 package com.github.highcumontoa.onchainrpcindexerjava.api;
 
+import com.github.highcumontoa.onchainrpcindexerjava.follow.BlockFollower;
+import com.github.highcumontoa.onchainrpcindexerjava.follow.FollowRangeResult;
+import com.github.highcumontoa.onchainrpcindexerjava.follow.FollowStatus;
 import com.github.highcumontoa.onchainrpcindexerjava.ingest.IngestResult;
 import com.github.highcumontoa.onchainrpcindexerjava.ingest.IngestionService;
 import com.github.highcumontoa.onchainrpcindexerjava.selection.NodeSelector;
@@ -21,11 +24,14 @@ public class IndexController {
     private final NodeSelector selector;
     private final IngestionService ingestion;
     private final JournaledIndexStore store;
+    private final BlockFollower follower;
 
-    public IndexController(NodeSelector selector, IngestionService ingestion, JournaledIndexStore store) {
+    public IndexController(NodeSelector selector, IngestionService ingestion,
+                           JournaledIndexStore store, BlockFollower follower) {
         this.selector = selector;
         this.ingestion = ingestion;
         this.store = store;
+        this.follower = follower;
     }
 
     /** 节点状态与隔离/恢复依据。 */
@@ -60,5 +66,24 @@ public class IndexController {
     public Map<String, Object> finalize(@RequestParam long height) {
         store.finalizeUpTo(height);
         return indexState();
+    }
+
+    /** 一次性把 [from, to] 这段高度补齐；已有追块在跑时本次触发被忽略。 */
+    @PostMapping("/follow/range")
+    public FollowRangeResult followRange(@RequestParam long from, @RequestParam long to) {
+        return follower.followRange(from, to);
+    }
+
+    /** 开关自动追块。 */
+    @PostMapping("/follow/auto")
+    public Map<String, Object> followAuto(@RequestParam boolean enabled) {
+        follower.setAutoEnabled(enabled);
+        return Map.of("autoEnabled", follower.isAutoEnabled());
+    }
+
+    /** 追块进度：当前高度、目标、落后量、最近一轮写入/跳过/失败与原因分类。 */
+    @GetMapping("/follow/status")
+    public FollowStatus followStatus() {
+        return follower.status();
     }
 }
