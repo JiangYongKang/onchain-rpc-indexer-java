@@ -19,6 +19,11 @@ public record IngestResult(
         return new IngestResult(false, height, null, null, reason, error);
     }
 
+    /** 数据类拒绝但携带数据来源节点，供追块层切换节点重试。 */
+    public static IngestResult rejectedAtNode(long height, String nodeId, RejectionReason reason, String error) {
+        return new IngestResult(false, height, nodeId, null, reason, error);
+    }
+
     public static IngestResult failed(Long height, String error) {
         return new IngestResult(false, height, null, null, null, error);
     }

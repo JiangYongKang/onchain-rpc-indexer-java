@@ -35,6 +35,18 @@ public class IngestionService {
 
     /** 采集指定高度。 */
     public IngestResult collectOnce(long height) {
+        return collectOnce(height, false);
+    }
+
+    /**
+     * 采集指定高度，且数据类拒绝（畸形/解码失败）也视为节点不可信：
+     * 记录失败并自动切换其他健康节点重试，供追块场景使用。
+     */
+    public IngestResult collectOnceWithNodeFailover(long height) {
+        return collectOnce(height, true);
+    }
+
+    private IngestResult collectOnce(long height, boolean failoverOnDataRejection) {
         if (height < 0) {
             return IngestResult.rejected(height, RejectionReason.INVALID_HEIGHT, "高度为负: " + height);
         }
@@ -48,6 +60,7 @@ public class IngestionService {
         int maxAttempts = Math.max(1, selector.status().size());
         Set<String> failedNodes = new HashSet<>();
         String lastError = null;
+        IngestResult lastDataRejection = null;
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             NodeSelector.Selection selection = selector.selectExcluding(failedNodes);
             if (selection == null) {
@@ -59,13 +72,28 @@ public class IngestionService {
             try {
                 long t0 = System.nanoTime();
                 BlockData block = selection.node().getBlock(height);
-                selector.recordSuccess(nodeId, (System.nanoTime() - t0) / 1_000_000);
+                long latencyMs = (System.nanoTime() - t0) / 1_000_000;
                 if (block == null) {
+                    selector.recordSuccess(nodeId, latencyMs);
                     lastError = "节点 " + nodeId + " 无高度 " + height + " 的区块";
                     log.warn("采集失败: {}", lastError);
                     continue;
                 }
-                return applyWithReorg(block, nodeId);
+                IngestResult result = applyWithReorg(block, nodeId);
+                if (failoverOnDataRejection && isUntrustworthyData(result)) {
+                    // 数据不可采信：计节点失败（响应成功但内容不可信，不计成功），切换节点重试
+                    selector.recordFailure(nodeId, "数据不可采信: " + result.rejectionReason());
+                    failedNodes.add(nodeId);
+                    lastDataRejection = result;
+                    lastError = "节点 " + nodeId + " 数据不可采信(" + result.rejectionReason() + "): "
+                            + result.error();
+                    log.warn("节点数据不可采信，切换节点重试: height={} node={} 原因={}",
+                            height, nodeId, result.rejectionReason());
+                    continue;
+                }
+                // 其余路径（成功、非容错模式的数据类拒绝、固化位点拒绝等）：调用本身成功，计成功
+                selector.recordSuccess(nodeId, latencyMs);
+                return result;
             } catch (NodeCallException e) {
                 selector.recordFailure(nodeId, e.getMessage());
                 failedNodes.add(nodeId);
@@ -73,7 +101,18 @@ public class IngestionService {
                 log.warn("节点失败，尝试切换: {}", lastError);
             }
         }
+        if (lastDataRejection != null) {
+            // 所有节点都给不出可信数据：保留可区分的拒绝原因
+            return IngestResult.rejected(height, lastDataRejection.rejectionReason(), lastError);
+        }
         return IngestResult.failed(height, lastError == null ? "采集失败" : lastError);
+    }
+
+    /** 数据类拒绝（畸形/解码失败）视为该节点数据不可采信。 */
+    private static boolean isUntrustworthyData(IngestResult result) {
+        return !result.success()
+                && (result.rejectionReason() == RejectionReason.MALFORMED_BLOCK
+                        || result.rejectionReason() == RejectionReason.DECODE_FAILURE);
     }
 
     /** 采集当前链头（先向择优节点询问链头高度）。 */
@@ -110,7 +149,7 @@ public class IngestionService {
                 result = store.apply(current);
             } catch (RejectionException e) {
                 log.info("写入被拒绝: height={} 归一化原因={} 详情={}", cursor, e.reason(), e.getMessage());
-                return IngestResult.rejected(cursor, e.reason(), e.getMessage());
+                return IngestResult.rejectedAtNode(cursor, nodeId, e.reason(), e.getMessage());
             }
             switch (result.outcome()) {
                 case APPENDED, DUPLICATE_IGNORED -> {

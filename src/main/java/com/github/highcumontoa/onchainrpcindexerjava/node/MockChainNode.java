@@ -77,6 +77,12 @@ public class MockChainNode implements ChainNode {
         undecodableHeights.add(height);
     }
 
+    /** 清除全部注入的畸形/解码失败故障（模拟节点修复）。 */
+    public void clearInjectedFaults() {
+        malformedHeights.clear();
+        undecodableHeights.clear();
+    }
+
     // ---- ChainNode ----
 
     @Override

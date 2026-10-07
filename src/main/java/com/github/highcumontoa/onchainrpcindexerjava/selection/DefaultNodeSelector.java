@@ -98,11 +98,24 @@ public class DefaultNodeSelector implements NodeSelector {
             rationale.add("无可用节点：全部节点均被隔离且未到恢复探测时间");
             return null;
         }
-        // 打分：半开节点降权；其余按平均延迟升序、失败率升序。
+        // 半开节点优先探测：冷却期满后给它一次真实调用机会，探测成功即恢复，
+        // 保证被隔离节点满足恢复条件后确实重新参与，而不是一直挂着用不上。
+        List<Map.Entry<String, Stats>> halfOpen = candidates.stream()
+                .filter(e -> e.getValue().halfOpen)
+                .toList();
+        if (!halfOpen.isEmpty()) {
+            Map.Entry<String, Stats> probe = halfOpen.stream()
+                    .min(Comparator.comparingDouble(e -> e.getValue().avgLatencyMs < 0
+                            ? 0 : e.getValue().avgLatencyMs))
+                    .orElseThrow();
+            rationale.add("选中节点 " + probe.getKey() + "：半开探测优先，验证其是否已恢复");
+            return new Selection(nodes.get(probe.getKey()),
+                    new SelectionReport(probe.getKey(), rationale));
+        }
+        // 打分：按平均延迟升序、失败率升序。
         Map.Entry<String, Stats> best = candidates.stream()
                 .min(Comparator
-                        .<Map.Entry<String, Stats>, Integer>comparing(e -> e.getValue().halfOpen ? 1 : 0)
-                        .thenComparingDouble((Map.Entry<String, Stats> e) ->
+                        .<Map.Entry<String, Stats>>comparingDouble(e ->
                                 e.getValue().avgLatencyMs < 0 ? 0 : e.getValue().avgLatencyMs)
                         .thenComparingDouble(this::failureRate))
                 .orElseThrow();
@@ -153,12 +166,24 @@ public class DefaultNodeSelector implements NodeSelector {
 
     @Override
     public List<NodeStatusView> status() {
+        long now = clock.getAsLong();
         List<NodeStatusView> views = new ArrayList<>();
         for (Map.Entry<String, Stats> e : stats.entrySet()) {
             Stats s = e.getValue();
             synchronized (s) {
-                views.add(new NodeStatusView(e.getKey(), s.isolated, s.consecutiveFailures,
-                        s.totalSuccesses, s.totalFailures, s.avgLatencyMs, s.lastError));
+                String state;
+                long remainingMs = 0;
+                if (!s.isolated) {
+                    state = "AVAILABLE";
+                } else if (now - s.isolatedAt >= recoveryCooldownMs) {
+                    state = "HALF_OPEN";
+                } else {
+                    state = "ISOLATED";
+                    remainingMs = recoveryCooldownMs - (now - s.isolatedAt);
+                }
+                views.add(new NodeStatusView(e.getKey(), s.isolated, state, remainingMs,
+                        s.consecutiveFailures, s.totalSuccesses, s.totalFailures,
+                        s.avgLatencyMs, s.lastError));
             }
         }
         views.sort(Comparator.comparing(NodeStatusView::nodeId));
